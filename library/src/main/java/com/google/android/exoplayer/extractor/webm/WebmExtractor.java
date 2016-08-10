@@ -19,6 +19,7 @@ import com.google.android.exoplayer.C;
 import com.google.android.exoplayer.MediaFormat;
 import com.google.android.exoplayer.ParserException;
 import com.google.android.exoplayer.drm.DrmInitData;
+import com.google.android.exoplayer.drm.DrmInitData.SchemeInitData;
 import com.google.android.exoplayer.extractor.ChunkIndex;
 import com.google.android.exoplayer.extractor.Extractor;
 import com.google.android.exoplayer.extractor.ExtractorInput;
@@ -26,7 +27,6 @@ import com.google.android.exoplayer.extractor.ExtractorOutput;
 import com.google.android.exoplayer.extractor.PositionHolder;
 import com.google.android.exoplayer.extractor.SeekMap;
 import com.google.android.exoplayer.extractor.TrackOutput;
-import com.google.android.exoplayer.util.Assertions;
 import com.google.android.exoplayer.util.LongArray;
 import com.google.android.exoplayer.util.MimeTypes;
 import com.google.android.exoplayer.util.NalUnitUtil;
@@ -44,6 +44,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 
 /**
  * An extractor to facilitate data retrieval from the WebM container format.
@@ -70,16 +71,23 @@ public final class WebmExtractor implements Extractor {
   private static final String CODEC_ID_MPEG4_AP = "V_MPEG4/ISO/AP";
   private static final String CODEC_ID_H264 = "V_MPEG4/ISO/AVC";
   private static final String CODEC_ID_H265 = "V_MPEGH/ISO/HEVC";
+  private static final String CODEC_ID_FOURCC = "V_MS/VFW/FOURCC";
   private static final String CODEC_ID_VORBIS = "A_VORBIS";
   private static final String CODEC_ID_OPUS = "A_OPUS";
   private static final String CODEC_ID_AAC = "A_AAC";
   private static final String CODEC_ID_MP3 = "A_MPEG/L3";
   private static final String CODEC_ID_AC3 = "A_AC3";
+  private static final String CODEC_ID_E_AC3 = "A_EAC3";
   private static final String CODEC_ID_TRUEHD = "A_TRUEHD";
   private static final String CODEC_ID_DTS = "A_DTS";
   private static final String CODEC_ID_DTS_EXPRESS = "A_DTS/EXPRESS";
   private static final String CODEC_ID_DTS_LOSSLESS = "A_DTS/LOSSLESS";
+  private static final String CODEC_ID_FLAC = "A_FLAC";
+  private static final String CODEC_ID_ACM = "A_MS/ACM";
+  private static final String CODEC_ID_PCM_INT_LIT = "A_PCM/INT/LIT";
   private static final String CODEC_ID_SUBRIP = "S_TEXT/UTF8";
+  private static final String CODEC_ID_VOBSUB = "S_VOBSUB";
+  private static final String CODEC_ID_PGS = "S_HDMV/PGS";
 
   private static final int VORBIS_MAX_INPUT_SIZE = 8192;
   private static final int OPUS_MAX_INPUT_SIZE = 5760;
@@ -120,8 +128,12 @@ public final class WebmExtractor implements Extractor {
   private static final int ID_VIDEO = 0xE0;
   private static final int ID_PIXEL_WIDTH = 0xB0;
   private static final int ID_PIXEL_HEIGHT = 0xBA;
+  private static final int ID_DISPLAY_WIDTH = 0x54B0;
+  private static final int ID_DISPLAY_HEIGHT = 0x54BA;
+  private static final int ID_DISPLAY_UNIT = 0x54B2;
   private static final int ID_AUDIO = 0xE1;
   private static final int ID_CHANNELS = 0x9F;
+  private static final int ID_AUDIO_BIT_DEPTH = 0x6264;
   private static final int ID_SAMPLING_FREQUENCY = 0xB5;
   private static final int ID_CONTENT_ENCODINGS = 0x6D80;
   private static final int ID_CONTENT_ENCODING = 0x6240;
@@ -146,6 +158,8 @@ public final class WebmExtractor implements Extractor {
   private static final int LACING_XIPH = 1;
   private static final int LACING_FIXED_SIZE = 2;
   private static final int LACING_EBML = 3;
+
+  private static final int FOURCC_COMPRESSION_VC1 = 0x31435657;
 
   /**
    * A template for the prefix that must be added to each subrip sample. The 12 byte end timecode
@@ -172,6 +186,23 @@ public final class WebmExtractor implements Extractor {
    * The length in bytes of a timecode in a subrip prefix.
    */
   private static final int SUBRIP_TIMECODE_LENGTH = 12;
+
+  /**
+   * The length in bytes of a WAVEFORMATEX structure.
+   */
+  private static final int WAVE_FORMAT_SIZE = 18;
+  /**
+   * Format tag indicating a WAVEFORMATEXTENSIBLE structure.
+   */
+  private static final int WAVE_FORMAT_EXTENSIBLE = 0xFFFE;
+  /**
+   * Format tag for PCM.
+   */
+  private static final int WAVE_FORMAT_PCM = 1;
+  /**
+   * Sub format for PCM.
+   */
+  private static final UUID WAVE_SUBFORMAT_PCM = new UUID(0x0100000000001000L, 0x800000AA00389B71L);
 
   private final EbmlReader reader;
   private final VarintReader varintReader;
@@ -272,6 +303,11 @@ public final class WebmExtractor implements Extractor {
   }
 
   @Override
+  public void release() {
+    // Do nothing
+  }
+
+  @Override
   public int read(ExtractorInput input, PositionHolder seekPosition) throws IOException,
       InterruptedException {
     sampleRead = false;
@@ -315,12 +351,16 @@ public final class WebmExtractor implements Extractor {
       case ID_BLOCK_DURATION:
       case ID_PIXEL_WIDTH:
       case ID_PIXEL_HEIGHT:
+      case ID_DISPLAY_WIDTH:
+      case ID_DISPLAY_HEIGHT:
+      case ID_DISPLAY_UNIT:
       case ID_TRACK_NUMBER:
       case ID_TRACK_TYPE:
       case ID_DEFAULT_DURATION:
       case ID_CODEC_DELAY:
       case ID_SEEK_PRE_ROLL:
       case ID_CHANNELS:
+      case ID_AUDIO_BIT_DEPTH:
       case ID_CONTENT_ENCODING_ORDER:
       case ID_CONTENT_ENCODING_SCOPE:
       case ID_CONTENT_COMPRESSION_ALGORITHM:
@@ -450,8 +490,8 @@ public final class WebmExtractor implements Extractor {
             throw new ParserException("Encrypted Track found but ContentEncKeyID was not found");
           }
           if (!sentDrmInitData) {
-            extractorOutput.drmInitData(
-                new DrmInitData.Universal(MimeTypes.VIDEO_WEBM, currentTrack.encryptionKeyId));
+            extractorOutput.drmInitData(new DrmInitData.Universal(
+                new SchemeInitData(MimeTypes.VIDEO_WEBM, currentTrack.encryptionKeyId)));
             sentDrmInitData = true;
           }
         }
@@ -509,6 +549,15 @@ public final class WebmExtractor implements Extractor {
       case ID_PIXEL_HEIGHT:
         currentTrack.height = (int) value;
         return;
+      case ID_DISPLAY_WIDTH:
+        currentTrack.displayWidth = (int) value;
+        return;
+      case ID_DISPLAY_HEIGHT:
+        currentTrack.displayHeight = (int) value;
+        return;
+      case ID_DISPLAY_UNIT:
+        currentTrack.displayUnit = (int) value;
+        return;
       case ID_TRACK_NUMBER:
         currentTrack.number = (int) value;
         return;
@@ -517,7 +566,7 @@ public final class WebmExtractor implements Extractor {
         return;
       case ID_DEFAULT_DURATION:
         currentTrack.defaultSampleDurationNs = (int) value;
-        break;
+        return;
       case ID_CODEC_DELAY:
         currentTrack.codecDelayNs = value;
         return;
@@ -526,6 +575,9 @@ public final class WebmExtractor implements Extractor {
         return;
       case ID_CHANNELS:
         currentTrack.channelCount = (int) value;
+        return;
+      case ID_AUDIO_BIT_DEPTH:
+        currentTrack.audioBitDepth = (int) value;
         return;
       case ID_REFERENCE_BLOCK:
         sampleSeenReferenceBlock = true;
@@ -738,7 +790,7 @@ public final class WebmExtractor implements Extractor {
                   contentSize - blockTrackNumberLength - headerSize - totalSamplesSize;
             } else {
               // Lacing is always in the range 0--3.
-              throw new IllegalStateException("Unexpected lacing value: " + lacing);
+              throw new ParserException("Unexpected lacing value: " + lacing);
             }
           }
 
@@ -1040,16 +1092,23 @@ public final class WebmExtractor implements Extractor {
         || CODEC_ID_MPEG4_AP.equals(codecId)
         || CODEC_ID_H264.equals(codecId)
         || CODEC_ID_H265.equals(codecId)
+        || CODEC_ID_FOURCC.equals(codecId)
         || CODEC_ID_OPUS.equals(codecId)
         || CODEC_ID_VORBIS.equals(codecId)
         || CODEC_ID_AAC.equals(codecId)
         || CODEC_ID_MP3.equals(codecId)
         || CODEC_ID_AC3.equals(codecId)
+        || CODEC_ID_E_AC3.equals(codecId)
         || CODEC_ID_TRUEHD.equals(codecId)
         || CODEC_ID_DTS.equals(codecId)
         || CODEC_ID_DTS_EXPRESS.equals(codecId)
         || CODEC_ID_DTS_LOSSLESS.equals(codecId)
-        || CODEC_ID_SUBRIP.equals(codecId);
+        || CODEC_ID_FLAC.equals(codecId)
+        || CODEC_ID_ACM.equals(codecId)
+        || CODEC_ID_PCM_INT_LIT.equals(codecId)
+        || CODEC_ID_SUBRIP.equals(codecId)
+        || CODEC_ID_VOBSUB.equals(codecId)
+        || CODEC_ID_PGS.equals(codecId);
   }
 
   /**
@@ -1118,6 +1177,8 @@ public final class WebmExtractor implements Extractor {
 
   private static final class Track {
 
+    private static final int DISPLAY_UNIT_PIXELS = 0;
+
     // Common elements.
     public String codecId;
     public int number;
@@ -1131,9 +1192,13 @@ public final class WebmExtractor implements Extractor {
     // Video elements.
     public int width = MediaFormat.NO_VALUE;
     public int height = MediaFormat.NO_VALUE;
+    public int displayWidth = MediaFormat.NO_VALUE;
+    public int displayHeight = MediaFormat.NO_VALUE;
+    public int displayUnit = DISPLAY_UNIT_PIXELS;
 
     // Audio elements. Initially set to their default values.
     public int channelCount = 1;
+    public int audioBitDepth = -1;
     public int sampleRate = 8000;
     public long codecDelayNs = 0;
     public long seekPreRollNs = 0;
@@ -1184,6 +1249,10 @@ public final class WebmExtractor implements Extractor {
           initializationData = hevcData.first;
           nalUnitLengthFieldLength = hevcData.second;
           break;
+        case CODEC_ID_FOURCC:
+          mimeType = MimeTypes.VIDEO_VC1;
+          initializationData = parseFourCcVc1Private(new ParsableByteArray(codecPrivate));
+          break;
         case CODEC_ID_VORBIS:
           mimeType = MimeTypes.AUDIO_VORBIS;
           maxInputSize = VORBIS_MAX_INPUT_SIZE;
@@ -1210,6 +1279,9 @@ public final class WebmExtractor implements Extractor {
         case CODEC_ID_AC3:
           mimeType = MimeTypes.AUDIO_AC3;
           break;
+        case CODEC_ID_E_AC3:
+          mimeType = MimeTypes.AUDIO_E_AC3;
+          break;
         case CODEC_ID_TRUEHD:
           mimeType = MimeTypes.AUDIO_TRUEHD;
           break;
@@ -1220,29 +1292,107 @@ public final class WebmExtractor implements Extractor {
         case CODEC_ID_DTS_LOSSLESS:
           mimeType = MimeTypes.AUDIO_DTS_HD;
           break;
+        case CODEC_ID_FLAC:
+          mimeType = MimeTypes.AUDIO_FLAC;
+          initializationData = Collections.singletonList(codecPrivate);
+          break;
+        case CODEC_ID_ACM:
+          mimeType = MimeTypes.AUDIO_RAW;
+          if (!parseMsAcmCodecPrivate(new ParsableByteArray(codecPrivate))) {
+            throw new ParserException("Non-PCM MS/ACM is unsupported");
+          }
+          if (audioBitDepth != 16) {
+            throw new ParserException("Unsupported PCM bit depth: " + audioBitDepth);
+          }
+          break;
+        case CODEC_ID_PCM_INT_LIT:
+          mimeType = MimeTypes.AUDIO_RAW;
+          if (audioBitDepth != 16) {
+            throw new ParserException("Unsupported PCM bit depth: " + audioBitDepth);
+          }
+          break;
         case CODEC_ID_SUBRIP:
           mimeType = MimeTypes.APPLICATION_SUBRIP;
+          break;
+        case CODEC_ID_VOBSUB:
+          mimeType = MimeTypes.APPLICATION_VOBSUB;
+          initializationData = Collections.singletonList(codecPrivate);
+          break;
+        case CODEC_ID_PGS:
+          mimeType = MimeTypes.APPLICATION_PGS;
           break;
         default:
           throw new ParserException("Unrecognized codec identifier.");
       }
 
       MediaFormat format;
+      // TODO: Consider reading the name elements of the tracks and, if present, incorporating them
+      // into the trackId passed when creating the formats.
       if (MimeTypes.isAudio(mimeType)) {
-        format = MediaFormat.createAudioFormat(trackId, mimeType, MediaFormat.NO_VALUE,
-            maxInputSize, durationUs, channelCount, sampleRate, initializationData, language);
+        format = MediaFormat.createAudioFormat(Integer.toString(trackId), mimeType,
+            MediaFormat.NO_VALUE, maxInputSize, durationUs, channelCount, sampleRate,
+            initializationData, language);
       } else if (MimeTypes.isVideo(mimeType)) {
-        format = MediaFormat.createVideoFormat(trackId, mimeType, MediaFormat.NO_VALUE,
-            maxInputSize, durationUs, width, height, initializationData);
+        if (displayUnit == Track.DISPLAY_UNIT_PIXELS) {
+          displayWidth = displayWidth == MediaFormat.NO_VALUE ? width : displayWidth;
+          displayHeight = displayHeight == MediaFormat.NO_VALUE ? height : displayHeight;
+        }
+        float pixelWidthHeightRatio = MediaFormat.NO_VALUE;
+        if (displayWidth != MediaFormat.NO_VALUE && displayHeight != MediaFormat.NO_VALUE) {
+          pixelWidthHeightRatio = ((float) (height * displayWidth)) / (width * displayHeight);
+        }
+        format = MediaFormat.createVideoFormat(Integer.toString(trackId), mimeType,
+            MediaFormat.NO_VALUE, maxInputSize, durationUs, width, height, initializationData,
+            MediaFormat.NO_VALUE, pixelWidthHeightRatio);
       } else if (MimeTypes.APPLICATION_SUBRIP.equals(mimeType)) {
-        format = MediaFormat.createTextFormat(trackId, mimeType, MediaFormat.NO_VALUE, durationUs,
-            language);
+        format = MediaFormat.createTextFormat(Integer.toString(trackId), mimeType,
+            MediaFormat.NO_VALUE, durationUs, language);
+      } else if (MimeTypes.APPLICATION_VOBSUB.equals(mimeType)
+          || MimeTypes.APPLICATION_PGS.equals(mimeType)) {
+        format = MediaFormat.createImageFormat(Integer.toString(trackId), mimeType,
+            MediaFormat.NO_VALUE, durationUs, initializationData, language);
       } else {
         throw new ParserException("Unexpected MIME type.");
       }
 
       this.output = output.track(number);
       this.output.format(format);
+    }
+
+    /**
+     * Builds initialization data for a {@link MediaFormat} from FourCC codec private data.
+     * <p>
+     * VC1 is the only supported compression type.
+     *
+     * @return The initialization data for the {@link MediaFormat}.
+     * @throws ParserException If the initialization data could not be built.
+     */
+    private static List<byte[]> parseFourCcVc1Private(ParsableByteArray buffer)
+        throws ParserException {
+      try {
+        buffer.skipBytes(16); // size(4), width(4), height(4), planes(2), bitcount(2).
+        long compression = buffer.readLittleEndianUnsignedInt();
+        if (compression != FOURCC_COMPRESSION_VC1) {
+          throw new ParserException("Unsupported FourCC compression type: " + compression);
+        }
+
+        // Search for the initialization data from the end of the BITMAPINFOHEADER. The last 20
+        // bytes of which are: sizeImage(4), xPel/m (4), yPel/m (4), clrUsed(4), clrImportant(4).
+        int startOffset = buffer.getPosition() + 20;
+        byte[] bufferData = buffer.data;
+        for (int offset = startOffset; offset < bufferData.length - 4; offset++) {
+          if (bufferData[offset] == 0x00 && bufferData[offset + 1] == 0x00
+              && bufferData[offset + 2] == 0x01 && bufferData[offset + 3] == 0x0F) {
+            // We've found the initialization data.
+            byte[] initializationData = Arrays.copyOfRange(bufferData, offset, bufferData.length);
+            return Collections.singletonList(initializationData);
+          }
+        }
+
+        throw new ParserException("Failed to find FourCC VC1 initialization data");
+      } catch (ArrayIndexOutOfBoundsException e) {
+        throw new ParserException("Error parsing FourCC VC1 codec private");
+      }
     }
 
     /**
@@ -1257,7 +1407,9 @@ public final class WebmExtractor implements Extractor {
         // TODO: Deduplicate with AtomParsers.parseAvcCFromParent.
         buffer.setPosition(4);
         int nalUnitLengthFieldLength = (buffer.readUnsignedByte() & 0x03) + 1;
-        Assertions.checkState(nalUnitLengthFieldLength != 3);
+        if (nalUnitLengthFieldLength == 3) {
+          throw new ParserException();
+        }
         List<byte[]> initializationData = new ArrayList<>();
         int numSequenceParameterSets = buffer.readUnsignedByte() & 0x1F;
         for (int i = 0; i < numSequenceParameterSets; i++) {
@@ -1374,6 +1526,29 @@ public final class WebmExtractor implements Extractor {
         return initializationData;
       } catch (ArrayIndexOutOfBoundsException e) {
         throw new ParserException("Error parsing vorbis codec private");
+      }
+    }
+
+    /**
+     * Parses an MS/ACM codec private, returning whether it indicates PCM audio.
+     *
+     * @return True if the codec private indicates PCM audio. False otherwise.
+     * @throws ParserException If a parsing error occurs.
+     */
+    private static boolean parseMsAcmCodecPrivate(ParsableByteArray buffer) throws ParserException {
+      try {
+        int formatTag = buffer.readLittleEndianUnsignedShort();
+        if (formatTag == WAVE_FORMAT_PCM) {
+          return true;
+        } else if (formatTag == WAVE_FORMAT_EXTENSIBLE) {
+          buffer.setPosition(WAVE_FORMAT_SIZE + 6); // unionSamples(2), channelMask(4)
+          return buffer.readLong() == WAVE_SUBFORMAT_PCM.getMostSignificantBits()
+              && buffer.readLong() == WAVE_SUBFORMAT_PCM.getLeastSignificantBits();
+        } else {
+          return false;
+        }
+      } catch (ArrayIndexOutOfBoundsException e) {
+        throw new ParserException("Error parsing MS/ACM codec private");
       }
     }
 
